@@ -3,22 +3,24 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 import glob
-import camera
+#import camera
+from lanelines import Camera
 
 def calibration_progress(msg):
     print(msg)
-
+    
+camera = Camera()
 cal_files = glob.glob('./camera_cal/calibration*.jpg')
 
-camera_matrix, dist_coeffs = camera.calibrate_from_chessboard(
-    cal_files, 
-    pattern_size=(9,6), 
+camera.calibrate_from_chessboard(
+    chessboard_files=cal_files, 
+    chessboard_size=(9,6), 
     save_diags=True,
     diag_prefix='corners-',
     progress=calibration_progress)
     
 example_img = cv2.imread('./camera_cal/calibration2.jpg')
-undist_img = camera.undistort_image(example_img, camera_matrix, dist_coeffs)
+undist_img = camera.undistort_image(example_img)
 cv2.imwrite('./camera_cal/undist-calibration2.jpg', undist_img)
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(24, 9))
