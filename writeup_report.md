@@ -64,21 +64,54 @@ I then used the output `obj_points` and `img_points` to compute the camera calib
 
 Below is an example of one of the chessboard calibration images, the diagnostic image showing detected corners, and the same image with distortion correction applied:
 
-![Calibration Image][img_cal_raw] ![Corner Detection][img_cal_corners] ![Distortion Corrected][img_cal_undist]
+![Calibration Image][img_cal_raw] 
+![Corner Detection][img_cal_corners] 
+![Distortion Corrected][img_cal_undist]
 
 ### Pipeline (single images)
 
 #### 1. Provide an example of a distortion-corrected image.
 
-The following is an example of an image as captured from the camera, and the same image with distortion correction applied (via CameraCal.undistort_image()):
+The following is an example of an image as captured from the camera, and the same image with distortion correction applied via CameraCal.undistort_image():
 
-![Test Image][img_test_raw] ![Distortion Corrected][img_test_undist]
+![Test Image][img_test_raw] 
+![Distortion Corrected][img_test_undist]
 
 #### 2. Describe how (and identify where in your code) you used color transforms, gradients or other methods to create a thresholded binary image.  Provide an example of a binary image result.
 
-I used a combination of color and gradient thresholds to generate a binary image (thresholding steps at lines # through # in `another_file.py`).  Here's an example of my output for this step.  (note: this is not actually from one of the test images)
+One of the main steps in the lane detection pipeline is creation of a binary image of candidate lane-line pixels. This "pixels of interest" image is then passed as input to the lane-line detection/measurement algorithm. In my code, the "pixels of interest" binary image is created by the function `lanelines.thresh_lane_lines()` (lanelines.py line 612).
 
-![alt text][image3]
+`thresh_lane_lines()` does the following:
+
+1. Creates a threshold image of 'white' pixels using function `lanelines.thresh_white()` (lanelines.py line 586).
+    * `thresh_white()` uses `cv2.inRange()` to threshold the RGB image for high values (190-255) in all 3 color channels.
+    * I implemented a script (thresh_white.py) that creates a simple interactive GUI for efficiently optimizing these threshold values.
+
+2. Creates a threshold image of 'yellow' pixels using function `lanelines.thresh_yellow()` (lanelines.py line 563):
+    * `thresh_yellow()` operates on an HSV color image, so `thresh_lane_lines()` uses `cv2.cvtColor()` to create an HSV image from the RGB input image.
+    * `thresh_yellow()` uses `cv2.inRange()` to threshold the HSV image within the hue range 15-25, where Saturation >= 70 and Value >= 130.
+    * I implemented a script (thresh_yellow.py) that creates a simple interactive GUI for efficiently optimizing these threshold values.
+    
+3. Uses `cv2.bitwise_or()` to combine the white and yellow threshold images into the result binary image.
+
+The following is an example of a source RGB image, the white threshold image, the yellow threshold image, and the combined threshold image:
+
+![RGB image][img_test_undist]
+![White threshold][img_thresh_white]
+![Yellow threshold][img_thresh_yellow]
+![Combined result][img_thresh_comb]
+
+NOTE: I also implemented and experimented with thresholding gradient magnitude/direction images, using the Sobel filter with a variety of kernel sizes and threshold values. This method is effective for marking lane-line pixels, but because it identifies contrast instead of color I found that it also marked too many other pixels unrelated to the lane lines, resulting in difficulty in later stages of lane-line detection.
+
+I do believe edge detection could be a beneficial contributor to the "pixels of interest" stage, but not simply as a straight addition to the white/yellow pixels. During the time I was developing this project, I made an effort to observe my own perception of lane lines while driving, and it's clear to me that contrast by itself is not a primary visual cue for my own lane-line perception. There's too many other high-contrast visual features on the road--color has to be the primary cue.
+
+My thought, though I did not have time to implement it, would be to use contrast to enhance the threshold image as follows:
+* Threshold white & yellow pixels as described above.
+* Combine white & yellow into combined threshold image.
+* Use morphological dilation on combined threshold image to create a mask.
+* Threshold gradient magnitude.
+* Add gradient threshold to combined threshold, using dilated mask.
+* This means pixels with strong contrast would be added to the result, as long as they're sufficiently close to pixels already identified as white/yellow. In other words, use contrast to enhance color instead of just adding to it.
 
 #### 3. Describe how (and identify where in your code) you performed a perspective transform and provide an example of a transformed image.
 
