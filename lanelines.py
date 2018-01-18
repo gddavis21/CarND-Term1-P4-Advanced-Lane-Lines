@@ -2,6 +2,156 @@ import os
 import cv2
 import numpy as np
 
+NOMINAL_LANE_WIDTH = 3.7  # meters
+NOMINAL_DASH_LENGTH = 3.0 # meters
+RECT_LANE_WIDTH = 614     # pixels in rectified image
+RECT_DASH_LENGTH = 75     # pixels in rectified image
+PIXEL_SIZE_X = NOMINAL_LANE_WIDTH / RECT_LANE_WIDTH
+PIXEL_SIZE_Y = NOMINAL_DASH_LENGTH / RECT_DASH_LENGTH
+
+LANE_WIDTH_TOL = 1.5      # meters
+PARALLEL_LINES_TOL = 1.0  # meters
+
+
+class LaneDetectionPipeline:
+    '''
+    Callable class for lane detection pipeline:
+      - removes camera distortion from input image
+      - detects left & right lane-lines in image
+      - overlays image with lane-line graphics
+      - annotates image with measured radius-of-curvature
+      - annotates image with vehicle offset from lane center
+    '''
+    def __init__(self, 
+        camera_cal,     # CameraCal instance
+        rect_prsp):     # PerspectiveTransform instance
+        '''
+        '''
+        self._camera_cal = camera_cal
+        self._rect_prsp = rect_prsp
+        self._last_lane = None
+        # self._fail_counter = 0
+        
+    def __call__(self, raw_rgb):
+        '''
+        Pipeline function (callable class). Input image must be RGB.
+        '''
+        # undistort image (remove sensor/lens distortion)
+        rgb = self._camera_cal.undistort_image(raw_rgb)
+
+        # create pixels-of-interest mask
+        poi_mask = thresh_lane_lines(rgb)
+        
+        # detect lane lines
+        lane = None
+        
+        if self._last_lane:
+            # fast-fit next lane given prior lane
+            lane = self._detect_lane(poi_mask, prior=self._last_lane)
+                
+        if not lane:
+            # no prior (or fast-fit failed) -> use reliable/slow method
+            lane = self._detect_lane(poi_mask, prior=None)
+                
+        if not lane:
+            # lane detection failed
+            if self._last_lane:
+                # re-use last lane fit
+                lane = self._last_lane
+            else:
+                # nothing to do but bail
+                return LaneDetectionPipeline._failed_frame(rgb)
+                
+        # remember this lane to help with the next image
+        self._last_lane = lane
+
+        # annotate image with lane overlay & metrics
+        result = self._draw_lane_overlay(rgb, lane)
+        result = self._annotate_metrics(result, lane)
+        return result
+        
+    def _detect_lane(self, poi_mask, prior=None):
+        '''
+        Make new Lane instance from given pixels-of-interest mask.
+        Returns None if new lane is invalid.
+        '''
+        pix_size = (PIXEL_SIZE_X, PIXEL_SIZE_Y)
+        lane = Lane(poi_mask, self._rect_prsp, pix_size, prior=prior)
+        
+        is_valid = lane.is_valid(
+            NOMINAL_LANE_WIDTH, 
+            LANE_WIDTH_TOL, 
+            PARALLEL_LINES_TOL)
+        
+        return lane if is_valid else None
+        
+    def _draw_lane_overlay(self, image, lane):
+        # make overlay image of lane bounded by left/right contours
+        overlay = lane.overlay_image(lane_color=(0,255,0))
+
+        # alpha-blend source image with overlay
+        return cv2.addWeighted(image, 1, overlay, 0.3, 0)
+        
+    def _annotate_metrics(self, image, lane):
+        # annotate radius of curvature
+        cv2.putText(
+            image,
+            'Radius of Curvature = %d m' % int(lane.radius_of_curvature()),
+            org=(20,50),
+            fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+            fontScale=1,
+            color=(255,255,255),
+            thickness=1,
+            lineType=cv2.LINE_AA)
+
+        # annotate vehicle offset from lane center
+        image_size = (image.shape[1], image.shape[0])
+        veh_offs = self._vehicle_offset(lane, image_size)
+        
+        if veh_offs < 0.0:
+            offs_side = 'left'
+        else:
+            offs_side = 'right'
+        
+        cv2.putText(
+            image,
+            'Vehicle is %.2fm %s of center' % (abs(veh_offs), offs_side),
+            org=(20,100),
+            fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+            fontScale=1,
+            color=(255,255,255),
+            thickness=1,
+            lineType=cv2.LINE_AA)
+
+        return image
+        
+    def _vehicle_offset(self, lane, image_size):
+        '''
+        Compute offset of vehicle from center of lane
+        '''
+        # vehicle position = bottom-center of image, warped to top-down view
+        x_vehicle = image_size[0] / 2
+        y_bottom = image_size[1]
+        x_vehicle, y_bottom = self._rect_prsp.warp_point(x_vehicle, y_bottom)
+        return (x_vehicle * PIXEL_SIZE_X) - lane.position()
+    
+    @staticmethod
+    def _failed_frame(frame):
+        '''
+        '''
+        cv2.putText(
+            frame,
+            'FAILED',
+            org=(20,100),
+            fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+            fontScale=2,
+            color=(255,0,0),
+            thickness=2,
+            lineType=cv2.LINE_AA)
+            
+        return frame
+        
+        
 class CameraCal:
     def __init__(self):
         '''
@@ -126,6 +276,9 @@ class PerspectiveTransform:
             np.array([np.column_stack((x,y))]), 
             self._forward_transform)
         return np.hsplit(wrp[0], 2)
+        
+    def warp_point(self, x, y):
+        return self.warp_points(np.float32(x), np.float32(y))
 
     def unwarp_points(self, x, y):
         unw = cv2.perspectiveTransform(
@@ -133,82 +286,40 @@ class PerspectiveTransform:
             self._backward_transform)
         return np.hsplit(unw[0], 2)
         
+    def unwarp_point(self, x, y):
+        return self.unwarp_points(np.float32(x), np.float32(y))
+        
     @staticmethod
     def make_top_down():
         return PerspectiveTransform(
-            src_quad=np.float32([[192,719],[579,459],[701,459],[1122,719]]), 
-            dst_quad=np.float32([[240,719],[240,74],[1040,74],[1040,719]]))
+            # src_quad=np.float32([[602,442],[208,720],[1122,720],[680,442]]), 
+            src_quad=np.float32([[585,456],[208,720],[1122,720],[701,456]]), 
+            dst_quad=np.float32([[320,0],[320,720],[960,720],[960,0]]))
         
 
-# class LaneLine():
-    # def __init__(self):
-        # # was the line detected in the last iteration?
-        # self.detected = False  
-        # # x values of the last n fits of the line
-        # self.recent_xfitted = [] 
-        # #average x values of the fitted line over the last n iterations
-        # self.bestx = None     
-        # #polynomial coefficients averaged over the last n iterations
-        # self.best_fit = None  
-        # #polynomial coefficients for the most recent fit
-        # self.current_fit = [np.array([False])]  
-        # #radius of curvature of the line in some units
-        # self.radius_of_curvature = None 
-        # #distance in meters of vehicle center from the line
-        # self.line_base_pos = None 
-        # #difference in fit coefficients between last and new fits
-        # self.diffs = np.array([0,0,0], dtype='float') 
-        # #x values for detected line pixels
-        # self.allx = None  
-        # #y values for detected line pixels
-        # self.ally = None
-        
-class LaneLine:
-    def __init__(self, xpix, ypix, image_size, pixel_size):
-        self.xpix = xpix
-        self.ypix = ypix
-        self.image_size = image_size
-        self.pixel_size = pixel_size
-        self.coeffs_pix = np.polyfit(ypix, xpix, 2)
-        self.coeffs_world = np.polyfit(ypix*pixel_size[1], xpix*pixel_size[0], 2)
-        
-    def source_pixels(self):
-        return self.xpix, self.ypix
-        
-    def contour(self, yvals):
-        return np.polyval(self.coeffs_pix, yvals)
-    
-    def position(self):
-        # position = evaluate lane-line polynomial at bottom of image
-        y = (self.image_size[1]-1)*self.pixel_size[1]
-        return np.polyval(self.coeffs_world, y)
-        
-    def radius_of_curvature(self):
-        # evaluate radius at bottom of image
-        C = self.coeffs_world
-        y = (self.image_size[1]-1)*self.pixel_size[1]
-        return ((1 + (2*C[0]*y + C[1])**2)**1.5) / np.absolute(2*C[0])
-        
 class Lane:
     def __init__(self, poi_mask, rect_prsp, rect_pixel_size, prior=None):
-        self.poi_mask = poi_mask
-        self.image_size = (poi_mask.shape[1], poi_mask.shape[0])
-        self.pixel_size = rect_pixel_size
-        self.prsp = rect_prsp
-        self.prior = prior
-        self.rect_poi_mask = rect_prsp.warp_image(poi_mask, self.image_size)
-        self.left_line = None
-        self.right_line = None
+        self._poi_mask = poi_mask
+        self._image_size = (poi_mask.shape[1], poi_mask.shape[0])
+        self._pixel_size = rect_pixel_size
+        self._prsp = rect_prsp
+        self._prior = prior
+        self._rect_poi_mask = rect_prsp.warp_image(poi_mask, self._image_size)
+        self._rect_poi_mask[self._rect_poi_mask > 192] = 255
+        self._left_line = None
+        self._right_line = None
         if prior:
-            self.detect_lane_lines_with_prior(prior)
+            self._detect_lane_lines_with_prior(prior)
         else:
-            self.detect_lane_lines_from_scratch()
+            self._detect_lane_lines_from_scratch()
         
-    def detect_lane_lines_from_scratch(self):
+    def _detect_lane_lines_from_scratch(self):
         '''
         '''
         # start with rectified binary
-        rect_binary = self.rect_poi_mask // 255
+        rect_binary = self._rect_poi_mask // 255
+        # rect_binary = np.zeros_like(self._rect_poi_mask)
+        # rect_binary[self._rect_poi_mask > 0] = 1
         # Take a histogram of the bottom half of the image
         histogram = np.sum(rect_binary[rect_binary.shape[0]//2:,:], axis=0)
         # Find the peak of the left and right halves of the histogram
@@ -229,9 +340,9 @@ class Lane:
         leftx_current = leftx_base
         rightx_current = rightx_base
         # Set the width of the windows +/- margin
-        margin = 100
+        margin = 60
         # Set minimum number of pixels found to recenter window
-        minpix = 50
+        minpix = 30
         # Create empty lists to receive left and right lane pixel indices
         left_lane_inds = []
         right_lane_inds = []
@@ -269,35 +380,41 @@ class Lane:
         rightx = nonzerox[right_lane_inds]
         righty = nonzeroy[right_lane_inds] 
         
-        self.left_line = LaneLine(leftx, lefty, self.image_size, self.pixel_size)
-        self.right_line = LaneLine(rightx, righty, self.image_size, self.pixel_size) 
+        self._left_line = LaneLine(
+            leftx, lefty, 
+            self._image_size, 
+            self._prsp, 
+            self._pixel_size)
+            
+        self._right_line = LaneLine(
+            rightx, righty, 
+            self._image_size, 
+            self._prsp, 
+            self._pixel_size) 
         
-    def detect_lane_lines_with_prior(self, prior):
+    def _detect_lane_lines_with_prior(self, prior):
         '''
         '''
         # start with rectified binary
-        rect_binary = self.rect_poi_mask // 255
+        rect_binary = self._rect_poi_mask // 255
+        # rect_binary = np.zeros_like(self._rect_poi_mask)
+        # rect_binary[self._rect_poi_mask > 0] = 1
 
+        # compute left-line and right-line boundary regions
         nonzero = rect_binary.nonzero()
         nonzeroy = np.array(nonzero[0])
         nonzerox = np.array(nonzero[1])
-        margin = 100
+        margin = 60
 
-        prior_left = prior.left_line.contour(nonzeroy)
+        prior_left = prior._left_line.contour(nonzeroy)
         left_bound = prior_left - margin
         right_bound = prior_left + margin
         left_lane_inds = ((nonzerox > left_bound) & (nonzerox < right_bound))
-        # left_lane_inds = ((nonzerox > (left_fit[0]*(nonzeroy**2) + left_fit[1]*nonzeroy + 
-        # left_fit[2] - margin)) & (nonzerox < (left_fit[0]*(nonzeroy**2) + 
-        # left_fit[1]*nonzeroy + left_fit[2] + margin))) 
 
-        prior_right = prior.right_line.contour(nonzeroy)
+        prior_right = prior._right_line.contour(nonzeroy)
         left_bound = prior_right - margin
         right_bound = prior_right + margin
         right_lane_inds = ((nonzerox > left_bound) & (nonzerox < right_bound))
-        # right_lane_inds = ((nonzerox > (right_fit[0]*(nonzeroy**2) + right_fit[1]*nonzeroy + 
-        # right_fit[2] - margin)) & (nonzerox < (right_fit[0]*(nonzeroy**2) + 
-        # right_fit[1]*nonzeroy + right_fit[2] + margin)))  
 
         # Again, extract left and right line pixel positions
         leftx = nonzerox[left_lane_inds]
@@ -305,53 +422,27 @@ class Lane:
         rightx = nonzerox[right_lane_inds]
         righty = nonzeroy[right_lane_inds]
 
-        self.left_line = LaneLine(leftx, lefty, self.image_size, self.pixel_size)
-        self.right_line = LaneLine(rightx, righty, self.image_size, self.pixel_size) 
+        self._left_line = LaneLine(
+            leftx, lefty, 
+            self._image_size, 
+            self._prsp, 
+            self._pixel_size)
+            
+        self._right_line = LaneLine(
+            rightx, righty, 
+            self._image_size, 
+            self._prsp, 
+            self._pixel_size) 
 
-        # # Fit a second order polynomial to each
-        # left_fit = np.polyfit(lefty, leftx, 2)
-        # right_fit = np.polyfit(righty, rightx, 2)
-        # # Generate x and y values for plotting
-        # ploty = np.linspace(0, rect_binary.shape[0]-1, rect_binary.shape[0] )
-        # left_fitx = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
-        # right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
-
-        # # Create an image to draw on and an image to show the selection window
-        # out_img = np.dstack((rect_binary, rect_binary, rect_binary))*255
-        # window_img = np.zeros_like(out_img)
-        # # Color in left and right line pixels
-        # out_img[nonzeroy[left_lane_inds], nonzerox[left_lane_inds]] = [255, 0, 0]
-        # out_img[nonzeroy[right_lane_inds], nonzerox[right_lane_inds]] = [0, 0, 255]
-
-        # # Generate a polygon to illustrate the search window area
-        # # And recast the x and y points into usable format for cv2.fillPoly()
-        # left_line_window1 = np.array([np.transpose(np.vstack([left_fitx-margin, ploty]))])
-        # left_line_window2 = np.array([np.flipud(np.transpose(np.vstack([left_fitx+margin, 
-                                      # ploty])))])
-        # left_line_pts = np.hstack((left_line_window1, left_line_window2))
-        # right_line_window1 = np.array([np.transpose(np.vstack([right_fitx-margin, ploty]))])
-        # right_line_window2 = np.array([np.flipud(np.transpose(np.vstack([right_fitx+margin, 
-                                      # ploty])))])
-        # right_line_pts = np.hstack((right_line_window1, right_line_window2))
-
-        # # Draw the lane onto the warped blank image
-        # cv2.fillPoly(window_img, np.int_([left_line_pts]), (0,255, 0))
-        # cv2.fillPoly(window_img, np.int_([right_line_pts]), (0,255, 0))
-        # result = cv2.addWeighted(out_img, 1, window_img, 0.3, 0)
-        # plt.imshow(result)
-        # plt.plot(left_fitx, ploty, color='yellow')
-        # plt.plot(right_fitx, ploty, color='yellow')
-        # plt.xlim(0, 1280)
-        # plt.ylim(720, 0)        
-        
     def is_valid(self, nom_lane_width, lane_width_tol, parallel_lines_tol):
         '''
         '''
         # compute lane-line contours & differences
+        img_height = self._image_size[1]
         yvals = np.linspace(0, img_height-1, img_height)
-        xfit_L = self.left_line.contour(yvals)
-        xfit_R = self.right_line.contour(yvals)
-        diff = np.absolute(xfit_R - xfit_L) * self.pixel_size[0]
+        xfit_L = self._left_line.contour(yvals)
+        xfit_R = self._right_line.contour(yvals)
+        diff = np.absolute(xfit_R - xfit_L) * self._pixel_size[0]
         diff_bar = np.mean(diff)
         
         # check lane for correct width
@@ -365,28 +456,42 @@ class Lane:
         return True
         
     def position(self):
-        pos_L = self.left_line.position()
-        pos_R = self.right_line.position()
+        pos_L = self._left_line.position()
+        pos_R = self._right_line.position()
         return (pos_L + pos_R) / 2
         
     def radius_of_curvature(self):
-        rad_L = self.left_line.radius_of_curvature()
-        rad_R = self.right_line.radius_of_curvature()
+        rad_L = self._left_line.radius_of_curvature()
+        rad_R = self._right_line.radius_of_curvature()
         return (rad_L + rad_R) / 2
+        
+    def lane_lines_diagnostic(self):
+        out_img = np.dstack((self._rect_poi_mask, self._rect_poi_mask, self._rect_poi_mask))
+        xpix_L, ypix_L = self._left_line.lane_pixels()
+        xpix_R, ypix_R = self._right_line.lane_pixels()
+        out_img[ypix_L, xpix_L] = [255,0,0]
+        out_img[ypix_R, xpix_R] = [0,0,255]
+        img_height = self._image_size[1]
+        yvals = np.linspace(0, img_height-1, img_height)
+        xfit_L = self._left_line.contour(yvals)
+        xfit_R = self._right_line.contour(yvals)
+        out_img[np.int_(yvals), np.int_(xfit_L)] = [255,255,0]
+        out_img[np.int_(yvals), np.int_(xfit_R)] = [255,255,0]
+        return out_img
         
     def overlay_image(self, lane_color):
         '''
         '''
         # Create empty image to draw the overlay on
-        img_width = self.image_size[0]
-        img_height = self.image_size[1]
+        img_width = self._image_size[0]
+        img_height = self._image_size[1]
         empty_channel = np.zeros((img_height, img_width), dtype=np.uint8)
         overlay = np.dstack((empty_channel, empty_channel, empty_channel))
         
         # compute left/right lane contours
         yvals = np.linspace(0, img_height-1, img_height)
-        xfit_L = self.left_line.contour(yvals)
-        xfit_R = self.right_line.contour(yvals)
+        xfit_L = self._left_line.contour(yvals)
+        xfit_R = self._right_line.contour(yvals)
 
         # Recast x and y points into usable format for cv2.fillPoly()
         pts_L = np.array([np.transpose(np.vstack([xfit_L, yvals]))])
@@ -397,78 +502,41 @@ class Lane:
         cv2.fillPoly(overlay, np.int_([pts]), lane_color)
         
         # return unwarped overlay image
-        return self.prsp.unwarp_image(overlay, self.image_size)
-        
-class LaneDetectionPipeline:
-    '''
-    '''
-    def __init__(self, camera_cal, rect_prsp):
-        self.camera_cal = camera_cal
-        self.rect_prsp = rect_prsp
-        
-    def __call__(self, raw_rgb):
-        '''
-        '''
-        pix_size_x = 3.7 / 720
-        pix_size_y = 3.0 / 70
-        pix_size = (pix_size_x, pix_size_y)
-        
-        img_width = raw_rgb.shape[1]
-        img_height = raw_rgb.shape[0]
-        image_size = (img_width, img_height)
+        return self._prsp.unwarp_image(overlay, self._image_size)
 
-        # undistorted image (remove lens distortion)
-        rgb = self.camera_cal.undistort_image(raw_rgb)
+        
+class LaneLine:
+    def __init__(self, xpix, ypix, image_size, rect_prsp, pixel_size):
+        self._xpix = xpix
+        self._ypix = ypix
+        self._image_size = image_size
+        self._rect_prsp = rect_prsp
+        self._pixel_size = pixel_size
+        self._coeffs_pix = np.polyfit(ypix, xpix, 2)
+        self._coeffs_world = np.polyfit(ypix*pixel_size[1], xpix*pixel_size[0], 2)
+        
+    def lane_pixels(self):
+        return self._xpix, self._ypix
+        
+    def contour(self, yvals):
+        return np.polyval(self._coeffs_pix, yvals)
+    
+    def position(self):
+        # compute x position at bottom of rectified image
+        y_bottom = self._image_size[1]
+        x_line = np.polyval(self._coeffs_pix, y_bottom)
+        # scale to meters
+        return x_line*self._pixel_size[0]
+        
+        
+    def radius_of_curvature(self):
+        # evaluate radius (in meters) at bottom of image
+        A = self._coeffs_world[0]
+        B = self._coeffs_world[1]
+        y = self._image_size[1] * self._pixel_size[1]
+        return ((1 + (2*A*y + B)**2)**1.5) / np.absolute(2*A)
 
-        # pixels-of-interest mask
-        poi_mask = thresh_lane_lines(rgb)
-        
-        # detect lane lines
-        lane = Lane(poi_mask, self.rect_prsp, pix_size)
 
-        # make overlay image of lane bounded by left/right contours
-        overlay = lane.overlay_image(lane_color=(0,255,0))
-
-        # blend undistorted image with overlay
-        result = cv2.addWeighted(rgb, 1, overlay, 0.3, 0)
-        
-        # und_fx_L, und_fy_L = prsp.unwarp_points(td_fx_L, td_fy)
-        # und_fx_R, und_fy_R = prsp.unwarp_points(td_fx_R, td_fy)
-        # result[np.int_(und_fy_L), np.int_(und_fx_L)] = [255,0,0]
-        # result[np.int_(und_fy_R), np.int_(und_fx_R)] = [255,0,0]
-        
-        # annotate radius of curvature
-        cv2.putText(
-            result,
-            'Radius of Curvature = %d m' % int(lane.radius_of_curvature()),
-            org=(20,50),
-            fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-            fontScale=1,
-            color=(255,255,255),
-            thickness=1,
-            lineType=cv2.LINE_AA)
-
-        # annotate vehicle offset from lane center
-        td_img_ctr_x, td_img_bot_y = self.rect_prsp.warp_points(img_width/2, img_height-1)
-        veh_offs = lane.position() - (td_img_ctr_x * pix_size_x)
-        
-        if veh_offs < 0.0:
-            offs_side = 'left'
-        else:
-            offs_side = 'right'
-        
-        cv2.putText(
-            result,
-            'Vehicle is %.2fm %s of center' % (abs(veh_offs), offs_side),
-            org=(20,100),
-            fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-            fontScale=1,
-            color=(255,255,255),
-            thickness=1,
-            lineType=cv2.LINE_AA)
-
-        return result
-        
 def sobel_xy(gray, kernel_size=3):
     scale = 1.0 / 2.0**(kernel_size*2 - 4)
     sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=kernel_size, scale=scale)
@@ -644,21 +712,3 @@ def thresh_lane_lines(rgb):
     # # out_img[np.round(ploty), np.round(right_fitx)] = [255, 255, 0]
     # # return out_img
     
-# def filled_lane_overlay(image_size, fx_L, fx_R, fy, lane_color):
-    # '''
-    # '''
-    # # Create empty image to draw the overlay on
-    # empty = np.zeros((image_size[1],image_size[0]), dtype=np.uint8)
-    # overlay = np.dstack((empty, empty, empty))
-
-    # # Recast x and y points into usable format for cv2.fillPoly()
-    # pts_L = np.array([np.transpose(np.vstack([fx_L, fy]))])
-    # pts_R = np.array([np.flipud(np.transpose(np.vstack([fx_R, fy])))])
-    # pts = np.hstack((pts_L, pts_R))
-
-    # # Draw the lane onto the warped blank image
-    # cv2.fillPoly(overlay, np.int_([pts]), lane_color)
-    # return overlay
-    
-# def radius_of_curvature(coeff, x):
-    # return ((1 + (2*coeff[0]*x + coeff[1])**2)**1.5) / np.absolute(2*coeff[0])

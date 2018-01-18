@@ -23,4 +23,4 @@ process_image = LL.LaneDetectionPipeline(camera_cal, rect_prsp)
 
 clip = VideoFileClip('./project_video.mp4')
 lanes_clip = clip.fl_image(process_image)
-lanes_clip.write_videofile('./output_videos/curves_project.mp4', audio=False)
+lanes_clip.write_videofile('./output_videos/project_video_out.mp4', audio=False)
