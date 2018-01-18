@@ -64,9 +64,7 @@ I then used the output `obj_points` and `img_points` to compute the camera calib
 
 Below is an example of one of the chessboard calibration images, the diagnostic image showing detected corners, and the same image with distortion correction applied:
 
-![Calibration Image][img_cal_raw]
-![Corner Detection][img_cal_corners]
-![Distortion Corrected][img_cal_undist]
+![Calibration Image][img_cal_raw] ![Corner Detection][img_cal_corners] ![Distortion Corrected][img_cal_undist]
 
 ### Pipeline (single images)
 
@@ -74,8 +72,7 @@ Below is an example of one of the chessboard calibration images, the diagnostic 
 
 The following is an example of an image as captured from the camera, and the same image with distortion correction applied (via CameraCal.undistort_image()):
 
-![Test Image][img_test_raw]
-![Distortion Corrected][img_test_undist]
+![Test Image][img_test_raw] ![Distortion Corrected][img_test_undist]
 
 #### 2. Describe how (and identify where in your code) you used color transforms, gradients or other methods to create a thresholded binary image.  Provide an example of a binary image result.
 
