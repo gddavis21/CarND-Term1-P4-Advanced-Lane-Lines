@@ -28,6 +28,7 @@ The goals / steps of this project are the following:
 [img_thresh_white]: ./output_images/test_thresh_white.jpg "Threshold White Pixels"
 [img_thresh_comb]: ./output_images/test_thresh_combined.jpg "Combined Threshold Image"
 [img_lines_prsp]: ./output_images/straight_lines_prsp.jpg "Lane Lines in Perspective"
+[img_lines_undist]: ./output_images/straight_lines_undist.jpg "Straight Lane Lines"
 [img_lines_warp]: ./output_images/straight_lines_warped.jpg "Rectified Lane Lines (bird's eye view)"
 [img_thresh_warp]: ./output_images/test_thresh_warped.jpg "Rectified Threshold Image"
 [img_lane_det]: ./output_images/lane_detection.jpg "Lane Detection & Curve Fitting"
@@ -52,15 +53,15 @@ You're reading it!
 
 #### 1. Briefly state how you computed the camera matrix and distortion coefficients. Provide an example of a distortion corrected calibration image.
 
-The code for this step is contained in class method `CameraCal.calibrate_from_chessboard()` (lanelines.py 162-244).  
+I implemented camera calibration and distortion correction in class 'lanelines.CameraCal' (lanelines.py 155-252). The calibration code is contained in class method `CameraCal.calibrate_from_chessboard()` (lanelines.py line 162).
 
 I start by preparing "object points", which will be the (x, y, z) coordinates of the chessboard corners in the world. Here I am assuming the chessboard is fixed on the (x, y) plane at z=0, such that the object points are the same for each calibration image.  Thus, `nom_corners` is just a replicated array of coordinates, and `obj_points` will be appended with a copy of it every time I successfully detect all chessboard corners in a test image.  
 
-The next step is detection of the pattern of chessboard corners in each supplied calibration image. A 9x6 pattern of corner points is detected in each image using the `cv2.findChessboardCorners` function. With each successful chessboard detection, `img_points` is appended with the (x, y) pixel position of each of the corners in the image plane.
+The next step is detection of the chessboard corners pattern in each calibration image, using the `cv2.findChessboardCorners()` function. With each successful chessboard detection, `img_points` is appended with the (x, y) pixel position of each of the corners in the image plane.
 
-`CameraCal.calibrate_from_chessboard()` provides some optional parameters that enable the caller to save diagnostic images of the chessboard detection, using the 'cv2.drawChessboardCorners` function. This was useful during development as a way to verify that the detection was working as expected.
+`CameraCal.calibrate_from_chessboard()` provides optional parameters that enable the caller to save diagnostic images of corner detections, using the 'cv2.drawChessboardCorners()` function. This was useful during development as a way to verify the functionality of corner detection.
 
-I then used the output `obj_points` and `img_points` to compute the camera calibration and distortion coefficients using the `cv2.calibrateCamera()` function, and store these as member data in the CameraCal instance for later use. After calibrating, the CameraCal client is able to apply distortion correction to any number of images with class method `CameraCal.undistort_image()` which applies the `cv2.undistort()` function (using the previously computed calibration data), and returns the undistorted image. 
+I then use `obj_points` and `img_points` to compute the camera calibration and distortion coefficients with `cv2.calibrateCamera()` and store these results in member variables of the CameraCal instance. After calibrating, the CameraCal client can apply distortion correction to any number of images with method `CameraCal.undistort_image()` (lanelines.py line 246) which applies the `cv2.undistort()` function (using the stored calibration data), and returns the undistorted image. 
 
 Below is an example of one of the chessboard calibration images, the diagnostic image showing detected corners, and the same image with distortion correction applied:
 
@@ -70,9 +71,25 @@ Below is an example of one of the chessboard calibration images, the diagnostic 
 
 ### Pipeline (single images)
 
+My high-level image processing 'pipeline' is implemented via the 'callable' class 'lanelines.LaneDetectionPipeline' (lanelines.py 16-152). The class instance stores required camera calibration and perspective transform objects, and provides the `__call__()` mechanism which python uses to invoke the class instance like a function call. This technique enables my pipeline to conveniently encapsulate persistent state data like camera calibration and perspective transform objects, to provide a reusable interface for processing single images or video streams, and to cache 'prior state' data that's useful for efficient video stream processing.
+
+The 'pipeline' algorithm consists of the following steps:
+1. Apply distortion correction to incoming image
+2. Generate threshold image of lane-line candidate pixels
+3. Create an instance of `lanelines.Lane` which encapsulates the following:
+    * Segment left and right lane-line regions in the threshold image
+    * Compute functional approximations for left & right lane-line curves
+    * Compute lane radius of curvature
+    * Compute offset of vehicle from lane center
+4. Annotate the (undistorted) image with the following:
+    * Draw graphic representation of detected lane
+    * Print computed radius of curvature of the detected lane
+    * Print vehicle offset from center of detected lane
+5. Return annotated image
+
 #### 1. Provide an example of a distortion-corrected image.
 
-The following is an example of an image as captured from the camera, and the same image with distortion correction applied via CameraCal.undistort_image():
+The following is an example of a raw image captured by the camera, and the same image with distortion correction applied via `CameraCal.undistort_image()`:
 
 ![Test Image][img_test_raw] 
 ![Distortion Corrected][img_test_undist]
@@ -105,43 +122,41 @@ NOTE: I also implemented and experimented with thresholding gradient magnitude/d
 
 I do believe edge detection could be a beneficial contributor to the "pixels of interest" stage, but not simply as a straight addition to the white/yellow pixels. During the time I was developing this project, I made an effort to observe my own perception of lane lines while driving, and it's clear to me that contrast by itself is not a primary visual cue for my own lane-line perception. There's too many other high-contrast visual features on the road--color has to be the primary cue.
 
-My thought, though I did not have time to implement it, would be to use contrast to enhance the threshold image as follows:
+My idea, though I did not have time to implement it, would be to use contrast to enhance the threshold image as follows:
 * Threshold white & yellow pixels as described above.
 * Combine white & yellow into combined threshold image.
 * Use morphological dilation on combined threshold image to create a mask.
 * Threshold gradient magnitude.
-* Add gradient threshold to combined threshold, using dilated mask.
-* This means pixels with strong contrast would be added to the result, as long as they're sufficiently close to pixels already identified as white/yellow. In other words, use contrast to enhance color instead of just adding to it.
+* Add gradient threshold to combined threshold, masked by dilated combined threshold image.
+* This means pixels with strong contrast would be added to the result, as long as they're sufficiently close to pixels already identified as white/yellow. In other words, use contrast to enhance detected color instead of blindly adding to it.
 
 #### 3. Describe how (and identify where in your code) you performed a perspective transform and provide an example of a transformed image.
 
-The code for my perspective transform includes a function called `warper()`, which appears in lines 1 through 8 in the file `example.py` (output_images/examples/example.py) (or, for example, in the 3rd code cell of the IPython notebook).  The `warper()` function takes as inputs an image (`img`), as well as source (`src`) and destination (`dst`) points.  I chose the hardcode the source and destination points in the following manner:
+The lane-line detection logic uses a perspective transform to rectify the threshold image into the (top-down) plane of the road, which greatly simplifies the lane-line geometry to be analyzed (reducing a 3D problem to 2D). The code for my perspective transform is implemented in the class `lanelines.PerspectiveTransform` (lanelines.py 255-297). The class constructor takes as inputs source and destination quadrilaterals, which are used with the function `cv2.getPerspectiveTransform()` to compute both forward and backward transformation matrices. The class instance can then be used to perform perspective projection between the source and destination image planes.
 
-```python
-src = np.float32(
-    [[(img_size[0] / 2) - 55, img_size[1] / 2 + 100],
-    [((img_size[0] / 6) - 10), img_size[1]],
-    [(img_size[0] * 5 / 6) + 60, img_size[1]],
-    [(img_size[0] / 2 + 55), img_size[1] / 2 + 100]])
-dst = np.float32(
-    [[(img_size[0] / 4), 0],
-    [(img_size[0] / 4), img_size[1]],
-    [(img_size[0] * 3 / 4), img_size[1]],
-    [(img_size[0] * 3 / 4), 0]])
-```
+`PerspectiveTransform` provides the following instance methods:
+* `warp_image()` transforms a given image from source plane into destination plane, using the function `cv2.warpPerspective()` with the stored forward transform matrix.
+* `unwarp_image()` transforms a given (rectified) image from destination plane back to source plane, using the function `cv2.warpPerspective()` with the stored backward transform matrix.
+* `warp_point()` and `warp_points()` transform single and multiple x/y points from source plane into destination plane, using the function `cv2.perspectiveTransform()` with the stored forward transform matrix.
+* `unwarp_point()` and `unwarp_points()` transform single and multiple (rectified) x/y points from destination plane back to source plane, using the function `cv2.perspectiveTransform()` with the stored backward transform matrix.
 
-This resulted in the following source and destination points:
+To arrive at the source and destination coordinates, I selected an (undistorted) road image where the lane-lines are very straight, sketched out a trapezoid shape of the lane lines in perspective, observed the trapezoid corner points in the image, and then mapped these corner points to rectangular corners in an idealized top-down image plane. 
+
+![Perspective source corners][img_lines_prsp]
+
+The destination corner coordinates were carefully chosen as a 'masking' technique for the rectified image, balancing inclusion of potential lane pixels with exclusion of noisy pixels thresholded from the surrounding areas. This resulted in the following source and destination points:
 
 | Source        | Destination   | 
 |:-------------:|:-------------:| 
-| 585, 460      | 320, 0        | 
-| 203, 720      | 320, 720      |
-| 1127, 720     | 960, 720      |
-| 695, 460      | 960, 0        |
+| 585, 456      | 320, 0        | 
+| 208, 720      | 320, 720      |
+| 1122, 720     | 960, 720      |
+| 701, 456      | 960, 0        |
 
-I verified that my perspective transform was working as expected by drawing the `src` and `dst` points onto a test image and its warped counterpart to verify that the lines appear parallel in the warped image.
+The class static method `PerspectiveTransform.make_top_down()` (lanelines.py line 292) constructs a `PerspectiveTransform` instance with these hard-coded values. I verified that my perspective transform was working as expected by applying `PerspectiveTransform.warp_image()` on the 'straight-lines' road image and observing that the lane lines appear parallel in the warped image. 
 
-![alt text][image4]
+![Straight lines in perspective][img_lines_undist]
+![Rectified straight lines][img_lines_warp]
 
 #### 4. Describe how (and identify where in your code) you identified lane-line pixels and fit their positions with a polynomial?
 
