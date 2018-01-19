@@ -54,13 +54,13 @@ You're reading it!
 
 I implemented camera calibration and distortion correction in class 'lanelines.CameraCal' (lanelines.py 155-252). The calibration code is contained in class method `CameraCal.calibrate_from_chessboard()` (lanelines.py line 162).
 
-I start by preparing "object points", which will be the (x, y, z) coordinates of the chessboard corners in the world. Here I am assuming the chessboard is fixed on the (x, y) plane at z=0, such that the object points are the same for each calibration image.  Thus, `nom_corners` is just a replicated array of coordinates, and `obj_points` will be appended with a copy of it every time I successfully detect all chessboard corners in a test image.  
+* I start by preparing "object points", which will be the (x, y, z) coordinates of the chessboard corners in the world. Here I am assuming the chessboard is fixed on the (x, y) plane at z=0, such that the object points are the same for each calibration image.  Thus, `nom_corners` is just a replicated array of coordinates, and `obj_points` will be appended with a copy of it every time I successfully detect all chessboard corners in a test image.  
 
-The next step is detection of the chessboard corners pattern in each calibration image, using the `cv2.findChessboardCorners()` function. With each successful chessboard detection, `img_points` is appended with the (x, y) pixel position of each of the corners in the image plane.
+* The next step is detection of the chessboard corners pattern in each calibration image, using the `cv2.findChessboardCorners()` function. With each successful chessboard detection, `img_points` is appended with the (x, y) pixel position of each of the corners in the image plane.
 
-`CameraCal.calibrate_from_chessboard()` provides optional parameters that enable the caller to save diagnostic images of corner detections, using the 'cv2.drawChessboardCorners()` function. This was useful during development as a way to verify the functionality of corner detection.
+* `calibrate_from_chessboard()` provides optional parameters that enable the caller to save diagnostic images of corner detections, using the 'cv2.drawChessboardCorners()` function. This was useful during development as a way to verify the functionality of corner detection.
 
-I then use `obj_points` and `img_points` to compute the camera calibration and distortion coefficients with `cv2.calibrateCamera()` and store these results in member variables of the CameraCal instance. After calibrating, the CameraCal client can apply distortion correction to any number of images with method `CameraCal.undistort_image()` (lanelines.py line 246) which applies the `cv2.undistort()` function (using the stored calibration data), and returns the undistorted image. 
+* I then use `obj_points` and `img_points` to compute the camera calibration and distortion coefficients with `cv2.calibrateCamera()` and store these results in member variables of the CameraCal instance. After calibrating, the CameraCal client can apply distortion correction to any number of images with method `CameraCal.undistort_image()` (lanelines.py line 246) which applies the `cv2.undistort()` function (using the stored calibration data), and returns the undistorted image. 
 
 Below is an example of one of the chessboard calibration images, the diagnostic image showing detected corners, and the same image with distortion correction applied:
 
@@ -84,7 +84,6 @@ The 'pipeline' algorithm consists of the following steps:
     * Draw graphic representation of detected lane
     * Print computed radius of curvature of the detected lane
     * Print vehicle offset from center of detected lane
-5. Return annotated image
 
 #### 1. Provide an example of a distortion-corrected image.
 
@@ -176,12 +175,14 @@ Lane-line pixels are identified by the class `lanelines.Lane` (lanelines.py 300-
 3. If a prior `Lane` instance was given, the method `Lane._detect_lane_lines_with_prior()` (lanelines.py line 395) is used instead for detecting lane-lines:
     * The fitted lane-line contours are extracted from the prior left/right `LaneLine` instances.
     * Left & right 'lane pixel' sets are constructed from all white pixels lying within a band surrounding the prior lane-line contours.
+    * This should in theory be a much faster algorithm than the 'from scratch' non-prior algorithm.
     * As before, these 'lane pixel' sets are used to construct left & right `LaneLine` instances that are stored by the `Lane` for later use.
     
 As mentioned above, the class `lanelines.LaneLine` (lanelines.py 508-537) computes a quadratic polynomial curve x = Ay^2 + By + C that approximates the x-position of the lane-line, given a y-position. `LaneLine` utilizes the function `numpy.polyfit()` to compute the polynominal coefficients. `LaneLine` also provides the method `LaneLine.contour()` for rendering the curve, using the function `numpy.polyval()` to compute x positions for the given y positions.
 
-The following image illustrates the results of this lane-line detection and curve fitting procedure:
+The following images illustrates the results of this lane-line detection and curve fitting procedure:
 
+![Warped candidate pixels][img_thresh_warp]
 ![Lane-line detection & measurement][img_lane_det]
 
 #### 5. Describe how (and identify where in your code) you calculated the radius of curvature of the lane and the position of the vehicle with respect to center.
@@ -223,6 +224,8 @@ The following is an example of applying `LaneDetectionPipeline` on a test image:
 
 #### 1. Provide a link to your final video output.  Your pipeline should perform reasonably well on the entire project video (wobbly lines are ok but no catastrophic failures that would cause the car to drive off the road!).
 
+The project video is created by running the script `lanes_video.py` which uses `lanelines.CameraCal`, `lanelines.PerspectiveTransformation`, `lanelines.LaneDetectionPipeline` and `moviepy.editor.VideoFileClip` to process video images.
+
 Here's a [link to my video result](./output_videos/project_video_out.mp4)
 
 ---
@@ -231,4 +234,14 @@ Here's a [link to my video result](./output_videos/project_video_out.mp4)
 
 #### 1. Briefly discuss any problems / issues you faced in your implementation of this project.  Where will your pipeline likely fail?  What could you do to make it more robust?
 
-Here I'll talk about the approach I took, what techniques I used, what worked and why, where the pipeline might fail and how I might improve it if I were going to pursue this project further.  
+The main issues I faced were simply related to the fact that I'm a relative beginner with Python and Numpy, so it takes me a considerable amount of time to figure out how to efficiently structure my code, and how to use Numpy to manipulate images and other arrays. 
+
+Fortunately I do have substantial experience with OpenCV (in C++). In the past I've created several simple GUI's using the OpenCV HighGUI package for quickly dialing in various image processing parameters, and I was able to use that technique on this project as well (this time creating the GUI's with python scripts). This proved to be a huge time saver.
+
+Although I did view the more challenging lane-line videos, I chose to focus only on getting an acceptable result on the required project video (due to time constraints). I'm certain that my image processing pipeline, particularly the thresholding of candidate lane-line pixels, is too simple and would fail in darker lighting conditions, where the white/yellow lane-lines are substantially faded, and of course on any portion of the road where one of the lines disappears completely for some stretch of the road.
+
+As mentioned previously, I have some ideas about how to incorporate high-contrast pixels (edges) without introducing too much noise. I also experimented with using adaptive thresholding to identify white pixels, and this worked pretty well. I chose to go with the simpler threshold approach for white pixels since it worked just as well on the project video. However, I suspect these 2 methods for identifying white pixels could be used together for an improved result. Adaptive thresholding, as well as contrast/edge detection, should be very effective methods for dealing with varying lighting conditions.
+
+NOTE: adaptive threshold was only effective on the rectified image, not the camera image. This is because the adaptive threshold function `cv2.adaptiveThreshold()` applies an averaging 'block' at every pixel, with the block size being a user-defined parameter. Since the lane-line size/geometry varies greatly in the camera image, there's no good choice for the adaptive threshold block size. However, in the rectified image the lane-line size/geometry is approximately constant, so the adaptive threshold can apply a particular block size with meaningful results all over the image.
+
+Finally, I want to note that this project was both challenging and fun! I'm actually looking forward to returning to this code and making it more robust when I have more time--probably after I'm finished with the Self-Driving Car Nano-Degree program!
