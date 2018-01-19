@@ -34,7 +34,6 @@ The goals / steps of this project are the following:
 [img_lane_det]: ./output_images/lane_detection.jpg "Lane Detection & Curve Fitting"
 [img_pipeline_result]: ./output_images/pipeline_result.jpg "Pipeline Result Image"
 
-[video1]: ./project_video.mp4 "Video"
 [video_pipeline_result]: ./output_videos/project_video_out.mp4 "Project Video Output"
 
 ## [Rubric](https://review.udacity.com/#!/rubrics/571/view) Points
@@ -127,7 +126,7 @@ My idea, though I did not have time to implement it, would be to use contrast to
 * Combine white & yellow into combined threshold image.
 * Use morphological dilation on combined threshold image to create a mask.
 * Threshold gradient magnitude.
-* Add gradient threshold to combined threshold, masked by dilated combined threshold image.
+* Add gradient threshold to combined threshold, masked by dilation image.
 * This means pixels with strong contrast would be added to the result, as long as they're sufficiently close to pixels already identified as white/yellow. In other words, use contrast to enhance detected color instead of blindly adding to it.
 
 #### 3. Describe how (and identify where in your code) you performed a perspective transform and provide an example of a transformed image.
@@ -140,7 +139,7 @@ The lane-line detection logic uses a perspective transform to rectify the thresh
 * `warp_point()` and `warp_points()` transform single and multiple x/y points from source plane into destination plane, using the function `cv2.perspectiveTransform()` with the stored forward transform matrix.
 * `unwarp_point()` and `unwarp_points()` transform single and multiple (rectified) x/y points from destination plane back to source plane, using the function `cv2.perspectiveTransform()` with the stored backward transform matrix.
 
-To arrive at the source and destination coordinates, I selected an (undistorted) road image where the lane-lines are very straight, sketched out a trapezoid shape of the lane lines in perspective, observed the trapezoid corner points in the image, and then mapped these corner points to rectangular corners in an idealized top-down image plane. 
+To arrive at the source and destination coordinates, I selected an (undistorted) road image where the lane-lines are very straight, sketched out a trapezoid shape of the lane lines in perspective (using the bottom of the image as one of the trapezoid sides), observed the trapezoid corner points in the image, and then mapped these corner points to rectangular corners in an idealized top-down image plane. 
 
 ![Perspective source corners][img_lines_prsp]
 
@@ -160,19 +159,63 @@ The class static method `PerspectiveTransform.make_top_down()` (lanelines.py lin
 
 #### 4. Describe how (and identify where in your code) you identified lane-line pixels and fit their positions with a polynomial?
 
-Then I did some other stuff and fit my lane lines with a 2nd order polynomial kinda like this:
+Lane-line pixels are identified by the class `lanelines.Lane` (lanelines.py 300-505) as follows:
+1. `Lane` constructor takes as input the threshold 'pixels-of-interest' image, a `PerspectiveTransform` instance, and (optionally) a 'prior' Lane instance (result from the previous frame). The constructor uses the `PerspectiveTransform` to warp the threshold image into the rectified top-down view, then applies one of two lane detection algorithms, depending on whether or not a prior `Lane` instance was given.
+2. If no prior `Lane` instance was given, the method `Lane._detect_lane_lines_from_scratch()` (lanelines.py line 316) is used for detecting the lane-lines:
+    * Sub-divide the bottom half of the warped threshold image into left and right halves.
+    * Identify the image columns in left/right (bottom) halves containing the highest number of white pixels. These columns are selected as the initial left/right (horizontal) lane-line positions.
+    * Sliding window search: 
+        -'Place' left and right rectangular windows at the bottom of the image, centered on the initial lane-line positions, and identify white pixels within the window boundaries.
+        - Add these pixel (x,y) positions to left/right 'lane pixel' sets. 
+        - If a sufficient number of white pixels are found within the window, update the lane-line position to the mean of the white pixel x values.
+        - 'Slide' the window up by the height of the window. 
+        - Repeat this 'sliding window search' until the window reaches the top of the image.
+    * After completing the search, create instances of class `lanelines.LaneLine` (lanelines.py 508-537) for left and right lane-lines, given the left & right 'lane pixel' sets. 
+        - Store the left/right `LaneLine` instances as member data of the `Lane` instance. 
+        - `LaneLine` stores the given 'lane pixel' set, and fits a curve to the pixel positions that approximates the lane-line contour (see below for details).
+3. If a prior `Lane` instance was given, the method `Lane._detect_lane_lines_with_prior()` (lanelines.py line 395) is used instead for detecting lane-lines:
+    * The fitted lane-line contours are extracted from the prior left/right `LaneLine` instances.
+    * Left & right 'lane pixel' sets are constructed from all white pixels lying within a band surrounding the prior lane-line contours.
+    * As before, these 'lane pixel' sets are used to construct left & right `LaneLine` instances that are stored by the `Lane` for later use.
+    
+As mentioned above, the class `lanelines.LaneLine` (lanelines.py 508-537) computes a quadratic polynomial curve x = Ay^2 + By + C that approximates the x-position of the lane-line, given a y-position. `LaneLine` utilizes the function `numpy.polyfit()` to compute the polynominal coefficients. `LaneLine` also provides the method `LaneLine.contour()` for rendering the curve, using the function `numpy.polyval()` to compute x positions for the given y positions.
 
-![alt text][image5]
+The following image illustrates the results of this lane-line detection and curve fitting procedure:
+
+![Lane-line detection & measurement][img_lane_det]
 
 #### 5. Describe how (and identify where in your code) you calculated the radius of curvature of the lane and the position of the vehicle with respect to center.
 
-I did this in lines # through # in my code in `my_other_file.py`
+Calculation of the lane radius of curvature and vehicle/lane offset is accomplished using the `Lane` and `LaneLine` instances initialized by the lane detection algorithm.
+
+Radius of curvature:
+* The pipeline queries its initialized `Lane` instance for the radius of curvature and prints the resulting value to the annotated image.
+* `Lane` provides query method `Lane.radius_of_curvature()` (lanelines.py line 463), which queries its left and right `LaneLine` instances for radius of curvature, and returns their averaged value.
+* `LaneLine` provides query method `LaneLine.radius_of_curvature()` (lanelines.py line 532), which computes the lane-line radius of curvature as follows:
+    - The `LaneLine` constructor actually fits 2 polynomial approximations for the lane-line contour, one in pixel coordinates and the other in scaled world coordinates.
+    - The coefficients of the scaled world coordinates polynomial are used to evaluate the radius of curvature formula (given in class) at the bottom y-position of the image.
+    
+Vehicle offset:
+* Pipeline method `LaneDetectionPipeline._vehicle_offset()` (lanelines.py line 128) computes the offset of the vehicle center from the detected lane center.
+    - `_vehicle_offset()` uses its `PerspectiveTransform` instance to warp the bottom-center point of the camera image (vehicle position) to rectified coordinates, then scales to world coordinates, resulting in the vehicle position in rectified world coordinates.
+    - `_vehicle_offset()` queries its `Lane` instance for the lane position (also in rectified world coordinates).
+    - The difference between the vehicle position and the lane position is reported as the vehicle offset from lane center.
+* `Lane` provides query method `Lane.position()` (lanelines.py line 458), which queries its left and right `LaneLine` instances for lane-line positions, and returns their averaged value.
+* `LaneLine` provides query method `LaneLine.position()` (lanelines.py line 524), which evaluates its approximating polynomial at the bottom of the rectified image, then scales the resulting x-position to world coordinates.
 
 #### 6. Provide an example image of your result plotted back down onto the road such that the lane area is identified clearly.
 
-I implemented this step in lines # through # in my code in `yet_another_file.py` in the function `map_lane()`.  Here is an example of my result on a test image:
+As mentioned above, the lane identification pipeline is implemented by the 'callable' class `lanelines.LaneDetectionPipeline` (lanelines.py line 35). Overlaying the detected lane onto the road image is implemented in method `LaneDetectionPipeline._draw_lane_overlay()` (lanelines.py line 88).
+* `_draw_lane_overlay()` queries its `Lane` instance for a color mask of the lane area, then alpha blends the mask with the road image to produce the result image.
+* `Lane` provides method `Lane.overlay_image()` for creating the overlay mask.
+    - Create a black background image.
+    - Query left & right `LaneLine` instances for lane-line contours.
+    - Compute polygon from left & right lane-line contours and top/bottom of image.
+    - Use function `cv2.fillPoly()` to fill the polygon with the lane color, then use `PerspectiveTransform.unwarp_image()` to transform the mask image back to camera perspective.
 
-![alt text][image6]
+The following is an example of applying `LaneDetectionPipeline` on a test image:
+
+![Pipeline result image][img_pipeline_result]
 
 ---
 
@@ -180,7 +223,7 @@ I implemented this step in lines # through # in my code in `yet_another_file.py`
 
 #### 1. Provide a link to your final video output.  Your pipeline should perform reasonably well on the entire project video (wobbly lines are ok but no catastrophic failures that would cause the car to drive off the road!).
 
-Here's a [link to my video result](./project_video.mp4)
+Here's a [link to my video result](./output_videos/project_video_out.mp4)
 
 ---
 
